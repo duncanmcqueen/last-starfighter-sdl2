@@ -1,0 +1,35 @@
+# build artifacts
+/build/
+
+# python
+__pycache__/
+*.pyc
+
+# 2006 Windows release tree; kept locally, never published
+/Starfighter 4-25-6/
+
+# local screenshots and scratch space; never published
+/reference/
+
+# unrelated C64 sub-project
+/c64/
+/C64_PORT_SCOPE.md
+
+# development session notes
+/HANDOFF.md
+/.pi-conductor/
+
+# local working notes and tooling; never published
+/notes/
+/tools/
+/tests/*.py
+
+# session / work-in-progress media
+/beacon-active.bmp
+/beacon-active.png
+/attract-music.mid
+/Last Starfighter MIDI v2.mid
+
+# runtime data written beside the working directory
+starfighter-scores.dat
+starfighter-diagnostic.dat
