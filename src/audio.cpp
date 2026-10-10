@@ -15,7 +15,7 @@
 
 AudioOutput::AudioOutput() {
     SDL_AudioSpec wanted{};
-    // Device format: 44.1 kHz, 16-bit signed stereo, 1024-frame buffer.
+    // Device format: 44.1 kHz, 16-bit signed stereo, 2048-frame buffer.
     // nullptr for the device id means "default device"; bit 0 of the second
     // argument enables capture, which we do not use.
     wanted.freq = 44100;

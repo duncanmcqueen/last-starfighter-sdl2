@@ -246,7 +246,7 @@ static void haiku_ensure_audio_output() {
     };
     for (const char* path : paths) {
         image_id image = load_add_on(path);
-        if (image == B_APP_IMAGE) continue;
+        if (image == B_APP_IMAGE) continue; // nothing was loaded
         BMediaAddOn* addon = new BMediaAddOn(image);
         const char* fail = nullptr;
         if (addon->InitCheck(&fail) == B_OK) {
@@ -282,13 +282,14 @@ static void haiku_ensure_audio_output() {
 
 struct Sdl final {
     Sdl() {
-        // Haiku's SDL video driver owns the event loop (and posts the window
-        // close button as the quit event through it), so the events subsystem
-        // is redundant there. The joystick subsystem only exists on X11/DirectX
-        // in the shipped SDL build - querying it on Haiku fails the whole init.
+        // Haiku's shipped SDL2 build does not include the joystick subsystem,
+        // so querying it would fail the whole SDL_Init. SDL's Haiku driver
+        // creates its own BApplication and message loop, and posts the window
+        // close button as the quit event through it, so we let SDL own the
+        // BApplication rather than wrapping it in our own.
         const std::uint32_t flags =
 #ifdef __HAIKU__
-            SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS
+            SDL_INIT_VIDEO | SDL_INIT_AUDIO
 #else
             SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
             SDL_INIT_JOYSTICK
@@ -4037,11 +4038,12 @@ int main(int argc, char** argv) {
     if (realpath(argv[0], binpath) != nullptr) {
         char* dir = dirname(binpath);
         if (dir != nullptr) {
-            chdir(dir);
-            for (int i = 0; i < 4; ++i, chdir("..")) {
-                struct stat st;
-                if (stat("assets/Images", &st) == 0 && S_ISDIR(st.st_mode)) {
-                    break;
+            if (chdir(dir) == 0) {
+                for (int i = 0; i < 4; ++i, chdir("..")) {
+                    struct stat st;
+                    if (stat("assets/Images", &st) == 0 && S_ISDIR(st.st_mode)) {
+                        break;
+                    }
                 }
             }
         }
