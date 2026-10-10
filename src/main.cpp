@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,20 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#ifdef __HAIKU__
+#include <Application.h>
+#include <MediaRoster.h>
+#include <SoundPlayer.h>
+#include <MediaDefs.h>
+#include <MediaAddOn.h>
+#include <Window.h>
+#include <kernel/image.h>
+#include <libgen.h>
+#include <unistd.h>
+#include <limits.h>
+#include <sys/stat.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -212,10 +227,84 @@ Model3ds command_breakup_model(const Model3ds& source,
     return result;
 }
 
+#ifdef __HAIKU__
+// Haiku's media_addon_server crashes (null-deref in AudioMixer::Connected)
+// when a BSoundPlayer connects and no default audio output is registered.
+// The BSoundPlayer constructor then hangs the calling thread. This helper
+// loads the system audio adapter and sets it as the default output before
+// SDL gets a chance to create its BSoundPlayer.
+static void haiku_ensure_audio_output() {
+    BMediaRoster* roster = BMediaRoster::Roster();
+    if (roster == nullptr) return;
+    media_node output;
+    if (roster->GetAudioOutput(&output) == B_OK && output.node != 0)
+        return; // already have a default output
+
+    const char* paths[] = {
+        "/boot/system/add-ons/media/hmulti_audio.media_addon",
+        "/boot/system/add-ons/media/cortex_audioadapter.media_addon",
+    };
+    for (const char* path : paths) {
+        image_id image = load_add_on(path);
+        if (image == B_APP_IMAGE) continue;
+        BMediaAddOn* addon = new BMediaAddOn(image);
+        const char* fail = nullptr;
+        if (addon->InitCheck(&fail) == B_OK) {
+            int32 flavors = addon->CountFlavors();
+            for (int32 i = 0; i < flavors; ++i) {
+                const flavor_info* info = nullptr;
+                if (addon->GetFlavorAt(i, &info) != B_OK || info == nullptr)
+                    continue;
+                BMediaNode* node = nullptr;
+                status_t err = B_OK;
+                node = addon->InstantiateNodeFor(info, nullptr, &err);
+                if (node == nullptr || err != B_OK) {
+                    delete (flavor_info*)info;
+                    continue;
+                }
+                if (roster->SetAudioOutput(node->Node()) == B_OK) {
+                    node->Release();
+                    delete (flavor_info*)info;
+                    delete addon;
+                    unload_add_on(image);
+                    return;
+                }
+                node->Release();
+                delete (flavor_info*)info;
+            }
+        }
+        delete addon;
+        unload_add_on(image);
+    }
+}
+
+#endif // __HAIKU__
+
 struct Sdl final {
     Sdl() {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
-                     SDL_INIT_JOYSTICK) != 0) {
+        // Haiku's SDL video driver owns the event loop (and posts the window
+        // close button as the quit event through it), so the events subsystem
+        // is redundant there. The joystick subsystem only exists on X11/DirectX
+        // in the shipped SDL build - querying it on Haiku fails the whole init.
+        const std::uint32_t flags =
+#ifdef __HAIKU__
+            SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS
+#else
+            SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS |
+            SDL_INIT_JOYSTICK
+#endif
+            ;
+#ifdef __HAIKU__
+        // SDL_Init installs SIGINT/SIGTERM handlers that convert those
+        // signals into SDL_QUIT. On Haiku a spurious one arrives during
+        // startup and closes the window at once, so keep SDL out of it; the
+        // game already quits via the window close button and Esc/Q.
+        SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+        // Must run before SDL_Init: the Haiku audio driver creates a
+        // BSoundPlayer which hangs/crashes the mixer if no default output.
+        haiku_ensure_audio_output();
+#endif
+        if (SDL_Init(flags) != 0) {
             throw std::runtime_error(SDL_GetError());
         }
     }
@@ -610,12 +699,30 @@ int run(const fs::path& assets, bool smoke_test, bool start_fullscreen,
     }
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
     Sdl sdl;
+#ifdef __HAIKU__
+    // SDL's Haiku driver chdir()s to the executable's directory during
+    // SDL_Init when it believes the app was launched from the GUI (TERM
+    // unset, as when Tracker launches it). The font directory is compiled as
+    // a path relative to the working directory, so restore the directory the
+    // caller chose. assets is absolute, so the game data is unaffected.
+    std::error_code cwd_error;
+    std::filesystem::current_path(
+        std::filesystem::absolute(assets).parent_path(), cwd_error);
+#endif
 
-    const std::uint32_t window_flags =
+    std::uint32_t window_flags =
         SDL_WINDOW_RESIZABLE |
         (start_fullscreen
              ? static_cast<std::uint32_t>(SDL_WINDOW_FULLSCREEN_DESKTOP)
              : 0U);
+#ifdef __HAIKU__
+    // The dummy video driver (used for headless tests) rejects
+    // SDL_WINDOW_RESIZABLE and SDL_WINDOW_FULLSCREEN_DESKTOP.
+    if (SDL_getenv("SDL_VIDEODRIVER") &&
+        std::string(SDL_getenv("SDL_VIDEODRIVER")) == "dummy") {
+        window_flags = 0;
+    }
+#endif
     SDL_Window* window = SDL_CreateWindow(
         "STARFIGHTER", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         static_cast<int>(mode.width), static_cast<int>(mode.height),
@@ -623,6 +730,28 @@ int run(const fs::path& assets, bool smoke_test, bool start_fullscreen,
     if (!window) {
         throw std::runtime_error(SDL_GetError());
     }
+    SDL_ShowWindow(window);
+#ifdef __HAIKU__
+    // On Haiku, a window launched from a terminal may not receive keyboard
+    // focus automatically. Walk the BApplication's windows and activate the
+    // one SDL created.
+    if (be_app) {
+        BWindow* target = nullptr;
+        for (int32 i = be_app->CountWindows() - 1; i >= 0; --i) {
+            BWindow* w = be_app->WindowAt(i);
+            if (w && w->Title() && strcmp(w->Title(), "STARFIGHTER") == 0) {
+                target = w;
+                break;
+            }
+        }
+        if (!target && be_app->CountWindows() > 0) {
+            target = be_app->WindowAt(be_app->CountWindows() - 1);
+        }
+        if (target) {
+            target->Activate(true);
+        }
+    }
+#endif
 
     SDL_Renderer* renderer = SDL_CreateRenderer(
         window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -3895,6 +4024,29 @@ int run(const fs::path& assets, bool smoke_test, bool start_fullscreen,
 }
 
 int main(int argc, char** argv) {
+#ifdef __HAIKU__
+    // On Haiku, the Tracker launches apps with the Tracker's working
+    // directory, not the executable's.  SDL2's Haiku driver used to
+    // chdir() to the executable's directory during SDL_Init, but our
+    // run() tries to find the asset directory before SDL_Init runs.
+    // Look for the assets/ directory starting from the executable's
+    // directory and walking up the tree (up to 3 levels), setting CWD
+    // to the matching directory.  Based on the haikuports cavepacker
+    // patch -- chdir() before SDL_Init is required.
+    char binpath[PATH_MAX];
+    if (realpath(argv[0], binpath) != nullptr) {
+        char* dir = dirname(binpath);
+        if (dir != nullptr) {
+            chdir(dir);
+            for (int i = 0; i < 4; ++i, chdir("..")) {
+                struct stat st;
+                if (stat("assets/Images", &st) == 0 && S_ISDIR(st.st_mode)) {
+                    break;
+                }
+            }
+        }
+    }
+#endif
     fs::path assets = "assets";
     bool smoke_test = false;
     bool fullscreen = false;

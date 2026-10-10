@@ -1,9 +1,43 @@
 # Starfighter
 
-A Linux port of the 2006 Starfighter arcade game, rendered with SDL2.
+A port of the 2006 Starfighter arcade game, rendered with SDL2. The game logic
+is portable C++17; SDL2 and FreeType 2 provide the display, input, and audio,
+so the same sources build on Linux and Haiku with no further changes.
 
 This repository contains the port in `src/` and the game assets it loads in
 `assets/`.
+
+## Build the Haiku port
+
+The Haiku SDL2 and FreeType ports cover everything the game needs, so the
+sources build unchanged. Install the development packages with pkgman:
+
+```sh
+pkgman install libsdl2_devel freetype_devel unzip
+```
+
+The platform differences are guarded behind `__HAIKU__` in `src/main.cpp`
+(the joystick subsystem is not built into the shipped SDL, so
+`SDL_INIT_JOYSTICK` is skipped there) and auto-detected by `make`:
+
+```sh
+make
+./build/bin/starfighter --assets assets
+```
+
+The stamp step also marks the binary with the Tracker attributes
+(`BEOS:TYPE`/`BEOS:APP_SIG`) so it launches on double-click and appears in
+the Deskbar. SDL runs its own BApplication for the window and input, exactly
+as on other platforms.
+
+Run the unit and smoke tests with:
+
+```sh
+make test
+```
+
+(On Haiku the SDL dummy driver is used for the headless smoke and intro tests
+exactly as on Linux.)
 
 ## Build the Linux port
 

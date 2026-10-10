@@ -21,7 +21,7 @@ AudioOutput::AudioOutput() {
     wanted.freq = 44100;
     wanted.format = AUDIO_S16SYS;
     wanted.channels = 2;
-    wanted.samples = 1024;
+    wanted.samples = 2048;
     wanted.callback = &AudioOutput::mix_callback;
     wanted.userdata = this;
     device_ = SDL_OpenAudioDevice(nullptr, 0, &wanted, &format_, 0);
@@ -186,6 +186,9 @@ void AudioOutput::mix_callback(void* userdata, std::uint8_t* stream,
 void AudioOutput::mix(std::uint8_t* stream, int length) {
     std::memset(stream, 0, static_cast<std::size_t>(length));
     auto* output = reinterpret_cast<std::int16_t*>(stream);
+    // The length is in bytes; convert to the number of interleaved samples.
+    // For stereo 16-bit, each frame is 4 bytes (2 samples), so sample_count
+    // is the number of individual 16-bit values, not frames.
     const std::size_t sample_count =
         static_cast<std::size_t>(length) / sizeof(std::int16_t);
     for (Channel& channel : channels_) {
